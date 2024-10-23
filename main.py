@@ -208,48 +208,23 @@ def start (data , params,deNormalize_min_max='') :
         yhat0_data = np.zeros((y_data.shape[0], 1))
 
 
-        if model_name == 'TFT':
-            x_data = [x_data,s0_data,c0_data]  #for TFT
-        elif model_name == 'STAM':
-            x_data = [x_data,s_data, s0_data,c0_data,yhat0_data]     
-            y_data = list(y_data.swapaxes(0,1))    # Ty numpy lists each (30562, 1)
 
-        # elif model_name =='MAFS_extend_parlallel' or model_name == 'MAFS_extend_sequential':
-        #     x_data = [x_data, s0_data,c0_data]     
-        elif model_name in ['NN' , 'CNN', 'CNNLSTM','MAFS_extend_parlallel','MAFS_extend_sequential']:
+        if model_name in [ 'MAFS_extend_parlallel','MAFS_extend_sequential']:
             x_data = [x_data ]     
 
-
-        # print('xdata length ' , x_data.shape)
-        print('xdata length ' , len(x_data))
-        # print('y_data',y_data.shape)
-        
         return x_data, y_data
 
 
-    if model_name =='TFT':
-        model,weights_model = TFT(params).build_model()
-    elif model_name == 'STAM':
-        model , weights_model = STAM(params).build_model()
-
-    elif model_name == 'MAFS':
-        model , weights_model = MAFS(params).build_model()
-    elif model_name =='MAFS_extend_parlallel' or model_name =='MAFS_extend_sequential' :
+    if model_name  =='MAFS_extend_parlallel' or model_name =='MAFS_extend_sequential' :
         
         model , weights_model = MAFS_extend(params).build_model()
         no_parameters =  model.count_params()
         print('model model:',no_parameters)
         print('weights_model model:',weights_model.count_params())
         
-    elif model_name =='NN'  :
-        model  = NN(params).build_model()
-    elif model_name =='CNN'  :
-        model  = CNN(params).build_model()
-    elif model_name =='CNNLSTM'  :
-        model  = CNNLSTM(params).build_model()
-
         
-    # model , weights_model= Parallel_Attention(params).build_model()
+        
+        
 
     # Attention Weights Model
 
@@ -269,14 +244,11 @@ def start (data , params,deNormalize_min_max='') :
 
 
     x_train, y_train = get_proper_inputs(x_train, y_train)
-    print('done')
     x_val, y_val = get_proper_inputs(x_val, y_val)
-    print('now')
+
     
-    # outputs_train = list(y_train.swapaxes(0,1))    # Ty numpy lists each (30562, 1)
-    # outputs_val = list(y_val.swapaxes(0,1))        # Ty numpy lists each (8758, 1)
-    outputs_train = y_train # list(y_train.swapaxes(0,1))    # Ty numpy lists each (30562, 1)
-    outputs_val = y_val # list(y_val.swapaxes(0,1))        # Ty numpy lists each (8758, 1)
+    outputs_train = y_train # 
+    outputs_val = y_val #  
 
     no_parameters =  model.count_params()
     print('no_parameters:',no_parameters)
@@ -299,13 +271,6 @@ def start (data , params,deNormalize_min_max='') :
     end_time = time()
 
     ###################
-
-
-
- 
-
-    if model_name not in ['NN' , 'CNN', 'CNNLSTM']:
-        weights_model.set_weights(model.get_weights())
            
     training_time = np.round( end_time-start_time,3)
     with open(dir_+'/training_time.txt', 'w') as f:
@@ -338,73 +303,8 @@ def start (data , params,deNormalize_min_max='') :
     # Evaluate Model - Train, Validation, Test Sets
     x_test, y_test = get_proper_inputs(x_test, y_test)
 
-    train_metrics = evaluate_model (x_train, y_train, 'train')
-    val_metrics = evaluate_model (x_val, y_val, 'val')
-    test_metrics = evaluate_model (x_test, y_test, 'test')
 
     # Get Attention Weights
-    def get_weights_STAM  (x_data, y_data, dataset):
-        
-        # Get numpy array of alphas in shape (30652, 10, 2) from list of 2(Ty) elements each element (30652, 10, 1)
-        def alphas_array(prob_list):
-            
-            prob = np.array(prob_list)
-            print('prob',prob.shape)
-            prob = prob.swapaxes(0, 1)
-            prob = prob.swapaxes(1, 2)
-            prob = prob.reshape((prob.shape[0], prob.shape[1], prob.shape[2]))
-
-            # if len (prob.shape) ==3:
-            #     prob = prob.reshape((prob.shape[0], prob.shape[1], prob.shape[2]))
-            # elif   len (prob.shape) ==4:
-
-            return prob
-
-
-        # s_data = x_data[1] #x_data.transpose(0, 2, 1)   # (30652, 8, 10)
-        
-        # s0_data = np.zeros((y_data.shape[0], h_s))
-        # c0_data = np.zeros((y_data.shape[0], h_s))
-        # yhat0_data = np.zeros((y_data.shape[0], 1))
-        
-        # y_data_hat_prob = weights_model.predict([x_data, s_data, s0_data, c0_data, yhat0_data], batch_size = batch_size)
-        y_data_hat_prob = weights_model.predict(  x_data, batch_size = params['batch_size'] )
-        len_list = len(y_data_hat_prob)   # List of 6 elements  
-        
-        # alphas list: elements 1, 4, each element (30652, 10, 1)
-        y_data_hat_alphas = [y_data_hat_prob[i] for i in range(1, len_list,3)]
-        y_data_hat_alphas = alphas_array (y_data_hat_alphas)      # (30652, 10, 2)
-        np.save("%s/y_%s_hat_alphas"%(dir_, dataset), y_data_hat_alphas)  # y_val_hat_alphas
-        
-        # betas list: elements 2, 5, each element (30652, 8, 1)
-        y_data_hat_betas = [y_data_hat_prob[i] for i in range(2, len_list, 3)]
-        y_data_hat_betas = alphas_array (y_data_hat_betas)     # (30652, 8, 2)
-        np.save("%s/y_%s_hat_betas"%(dir_, dataset), y_data_hat_betas)  # y_val_hat_betas
-        
-        return y_data_hat_alphas, y_data_hat_betas
-
-
-
-
-    def tft_weights(x_data):
-        # _,spatial_weights,temporal_attention = weights_model.predict(x_train) 
-        _,spatial_weights ,temporal_attention = weights_model.predict(x_data) 
-        print('spatial_weights',spatial_weights.shape)
-        spatial_weights = np.reshape(spatial_weights , (spatial_weights.shape[0],x_data[0].shape[1]* x_data[0].shape[2])  )
-        # spatial_weights = spatial_weights.mean(0)
-        spatial_weights = pd.DataFrame(spatial_weights)
-        spatial_weights.to_csv("%s/%s_score.csv"%(dir_, dataset) )
-        print(spatial_weights )
-
-        print('temporal_attention',temporal_attention.shape)
-        temporal_attention = np.reshape(temporal_attention , (temporal_attention.shape[0],x_data[0].shape[1]* x_data[0].shape[1])  )
-        temporal_attention = pd.DataFrame(temporal_attention)
-
-        print('temporal_attention',temporal_attention)
-
-        temporal_attention.to_csv("%s/%stemporal_attention.csv"%(dir_, dataset) )
-
-
     for dataset in ['valid','test']:#'train',
         print(dataset)
 
@@ -418,57 +318,9 @@ def start (data , params,deNormalize_min_max='') :
             x_data = x_test
             y_data = y_test
                 
-            
-        if model_name =='TFT':
-            tft_weights(x_data)
+              
 
-        elif model_name == 'STAM':
-            # Attention Weights - Train, Validation, Test Sets
-            alphas,  betas = get_weights_STAM(x_data, y_data, dataset) 
-    
-
-        elif model_name == 'MAFS' :
-            _,score = weights_model.predict(x_data) 
-            print('score',score.shape)
-            print('x_data[0]',x_data[0].shape)
-
-            np.save("%s/%s_score"%(dir_, dataset), score)  # y_val_hat_alphas
-
-            score = np.reshape(score , (score.shape[0],x_data.shape[1]* x_data.shape[2])  )
-            # spatial_weights = spatial_weights.mean(0)
-            score = pd.DataFrame(score)
-            # score.to_csv(dir_+'/att_weights.csv')
-            # print(score )
-
-        elif     model_name =='MAFS_extend_parlallel' or model_name =='MAFS_extend_sequential' :
-            
-            # _,score,gate_v, gate_t = weights_model.predict(x_data) 
-            '''
-            if params['dataset_name'] == 'qld' :
-
-                y_hat = []
-                score = []
-                gate_V = []
-                gate_T =[]
-                
-
-                # for id in range(x_data[0].shape[0]):
-                for id in tqdm(range(x_data[0].shape[0]), desc = 'predicting for testexample '):    
-                    example = [x_data[i][id:id+1] for i in range(len(x_data)) ] 
-                    pred = weights_model.predict(example)
-                    if id ==0:
-                        y_hat, score, gate_V ,gate_T = pred[0],pred[1],pred[2],pred[3]
-                    else:
-                        y_hat = np.concatenate([y_hat,pred[0]],axis=0 )
-                        score = np.concatenate([score,pred[1]],axis=0 )  
-                        gate_V = np.concatenate([gate_V,pred[2]],axis=0 )  
-                        gate_T = np.concatenate([gate_T,pred[3]],axis=0 )  
-                    
-                out = [y_hat, score, gate_V,gate_T]
-            else:
-                out = weights_model.predict(x_data,batch_size = params['batch_size']) 
-            print(len(out))
-            '''
+        if     model_name =='MAFS_extend_parlallel' or model_name =='MAFS_extend_sequential' : 
             out = weights_model.predict(x_data,batch_size = params['batch_size']) 
             
             # 
@@ -492,41 +344,6 @@ def start (data , params,deNormalize_min_max='') :
             # elif params['use_VA']  and  not params['use_TA']  :
             #     gate_V = out[2]
             #     np.save("%s/%s_gate_V"%(dir_, dataset), gate_V)  # y_val_hat_alphas
-            '''
-
-            #yaht
-            y_hat =  [out[i] for i in range(0, len_list,no_items_in_list)]
-            y_hat = np.array(y_hat)
-            print("y_hat:",y_hat.shape)
-            y_hat = y_hat.swapaxes(0, 1)
-
-            print("y_hat:",y_hat.shape)
-            # y_data_hat_alphas = alphas_array (y_data_hat_alphas)      # (30652, 10, 2)
-            # np.save("%s/y_%s_hat_alphas"%(dir_, dataset), y_data_hat_alphas)  # y_val_hat_alphas
-
-
-            #score:  
-            score = [out[i] for i in range(1, len_list,no_items_in_list)]
-            score = np.array(score)
-            print("score:",score.shape)
-            score = score.swapaxes(0, 1)
-            np.save("%s/%s_score"%(dir_, dataset), score)  # y_val_hat_alphas
-
-
             
-
-            #gate_V:
-            gate_V = [out[i] for i in range(2, len_list,no_items_in_list)]
-            gate_V = np.array(gate_V)
-            gate_V = gate_V.swapaxes(0, 1)
-            np.save("%s/%s_gate_V"%(dir_, dataset), gate_V)  # y_val_hat_alphas
-            print(gate_V.shape)              
-            # gate_T: 
-            gate_T = [out[i] for i in range(3, len_list,no_items_in_list)]
-            gate_T = np.array(gate_T)
-            gate_T = gate_T.swapaxes(0, 1)
-            np.save("%s/%s_gate_T"%(dir_, dataset), gate_T)  # y_val_hat_alphas
-            print(gate_T.shape)           
-            '''
-
+            
     return '-----------------'+ 'DONE'+'---------------'  
