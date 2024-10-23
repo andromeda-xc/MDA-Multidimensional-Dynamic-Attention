@@ -55,6 +55,7 @@ class AmplificationLayer(layers.Layer):
 
 
 class Attention(  layers.Layer):
+    # by : https://github.com/philipperemy/keras-attention ; with some modifications 
     SCORE_LUONG = 'luong'
     SCORE_BAHDANAU = 'bahdanau'
 
