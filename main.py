@@ -1,5 +1,5 @@
 
-# fix random seed for reproducibility
+# 固定随机种子与 TensorFlow 运行参数，尽量提高实验可复现性。
 
 
 # import tensorflow  
@@ -17,10 +17,13 @@ np.random.seed(123)
 tf.random.set_seed(1234) 
 
 from keras import backend as k
-config =  tf.compat.v1.ConfigProto(intra_op_parallelism_threads=1, inter_op_parallelism_threads=1,
-allow_soft_placement=True, device_count = {'CPU': 1})
-sess = tf.compat.v1.Session(graph=tf.compat.v1.get_default_graph(),config=config)
-# k.set_session(sess)
+# 兼容 Keras 3: 不再显式创建 compat.v1 Session，
+# 只保留安全的显存按需增长设置。
+for _gpu in tf.config.list_physical_devices("GPU"):
+    try:
+        tf.config.experimental.set_memory_growth(_gpu, True)
+    except Exception:
+        pass
 # from models1 import *
 # from models_multistep import *
 from models_multistep_time_distrbuted import *
@@ -63,6 +66,9 @@ from tqdm import tqdm
 
 
 def start (data , params,deNormalize_min_max='') :
+    # data 约定为已经切好窗并划分完成的:
+    # (x_train, y_train, x_val, y_val, x_test, y_test, scaler_y)
+    # 这里不负责读取原始 CSV，而是只做训练、评估和结果落盘。
     x_train, y_train, x_val,y_val , x_test,y_test ,scaler_y= data
 
     # Print shapes
@@ -75,7 +81,7 @@ def start (data , params,deNormalize_min_max='') :
 
     model_name = params['model_name']
 
-    # Create directory to save results
+    # 训练产物按“数据集/任务/模型配置”分层保存，便于后续复盘。
     dir_ = '%s/%s/%s_Tx_%s_Ty_%s_inpvar_%s_run_%s'\
                 %(params['dataset_name'], params['pred_type'], model_name, params['time_steps'], params['horizon'], params['no_varibles'], params['seed'])
     
@@ -121,7 +127,11 @@ def start (data , params,deNormalize_min_max='') :
         plt.close()
             
 
-    # Evaluate Model
+    # 统一评估入口:
+    # 1) 模型预测
+    # 2) 反归一化回原始温度尺度
+    # 3) 只取最后一个预测步计算指标
+    # 4) 保存曲线、散点图和数值结果
     def evaluate_model (x_data, y_data, dataset):
         
         print('---------------- evaluate model ----------------')
@@ -202,6 +212,8 @@ def start (data , params,deNormalize_min_max='') :
     #####--------------------------------------------------------------------------------------------------------------------------------############################
 
     def get_proper_inputs(x_data , y_data):
+        # 保留旧版模型所需的占位输入构造逻辑。
+        # 当前 MAFS_extend 系列只真正使用 x_data 本身。
         s_data = x_data.transpose(0, 2, 1)
         s0_data = np.zeros((y_data.shape[0], params['h_s_lstm']))
         c0_data = np.zeros((y_data.shape[0], params['h_s_lstm']))
@@ -216,6 +228,8 @@ def start (data , params,deNormalize_min_max='') :
 
 
     if model_name  =='MAFS_extend_parlallel' or model_name =='MAFS_extend_sequential' :
+        # 训练模型负责输出预测值；
+        # weights_model 额外暴露注意力/score，便于解释和后处理。
         
         model , weights_model = MAFS_extend(params).build_model()
         no_parameters =  model.count_params()
@@ -235,6 +249,7 @@ def start (data , params,deNormalize_min_max='') :
             return lr * tf.math.exp(-0.1)
 
 
+    # 这里使用 EarlyStopping 作为主要收敛控制手段，避免在验证集上过拟合。
     callback_lists = [
         tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=params['patience'],verbose=True, restore_best_weights=True),
 
@@ -258,6 +273,7 @@ def start (data , params,deNormalize_min_max='') :
 
     start_time=time()
 
+    # MDA 主训练过程。当前实现按时间顺序训练，不打乱窗口顺序。
     hist = model.fit (x_train, outputs_train,
                     batch_size = params['batch_size'] ,
                     epochs = params['epochs'] ,
@@ -300,7 +316,7 @@ def start (data , params,deNormalize_min_max='') :
 
     #####fix these for all inputs of different data test..tran etc 
 
-    # Evaluate Model - Train, Validation, Test Sets
+    # 统一为验证集/测试集导出预测与注意力分数。
     x_test, y_test = get_proper_inputs(x_test, y_test)
 
 

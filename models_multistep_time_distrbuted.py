@@ -13,15 +13,16 @@ import random
 import numpy as np
 # import tensorflow_probability as tfp
 
-# tf.compat.v1.disable_eager_execution()
-tf.compat.v1.experimental.output_all_intermediates(True)
 tf.keras.backend.clear_session()
 tf.random.set_seed(111)
 
-config = tf.compat.v1.ConfigProto()
-config.gpu_options.allow_growth = True
-sess = tf.compat.v1.Session(config=config)
-# K.set_session(sess)
+# Keras 3 / TF 2.x 下不要再显式创建 compat.v1 Session。
+# 这里只保留安全的显存按需增长设置；如果当前没有 GPU，就直接跳过。
+for _gpu in tf.config.list_physical_devices("GPU"):
+    try:
+        tf.config.experimental.set_memory_growth(_gpu, True)
+    except Exception:
+        pass
 
 def reset_seed(seed):
     # tf.disable_v2_behavior()
@@ -39,8 +40,9 @@ def reset_seed(seed):
     # K.set_session(sess)
 
 def compile(model,params):
+    # 统一在这里定义损失函数与优化器，便于外层只关心模型结构。
     loss=tf.keras.losses.Huber()
-    optimizer = tf.keras.optimizers.Adam(lr=float(params['learning_rate']) )#,weight_decay = True)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=float(params['learning_rate']) )#,weight_decay = True)
     model.compile( loss=loss, optimizer=optimizer, metrics=['mae']) #'mse')
     return model
 
@@ -55,7 +57,9 @@ class AmplificationLayer(layers.Layer):
 
 
 class Attention(  layers.Layer):
-    # by : https://github.com/philipperemy/keras-attention ; with some modifications 
+    # 基础注意力层:
+    # - 支持 Luong / Bahdanau 两种打分方式
+    # - 可选接收 horizon 动态嵌入，用于构造“随预测步变化”的注意力
     SCORE_LUONG = 'luong'
     SCORE_BAHDANAU = 'bahdanau'
 
@@ -75,7 +79,8 @@ class Attention(  layers.Layer):
           self.hNorm =   tf.keras.layers.LayerNormalization()    
           self. intermidiate_projector =  tf.keras.layers.Dense(self.units ,use_bias=False) 
         input_dim = int(input_shape[0][-1])
-        with K.name_scope(self.name ):
+        # Keras 3 中 backend.name_scope 已移除，改用 TensorFlow 自带 name_scope。
+        with tf.name_scope(self.name ):
             # W in W*h_S.
             if self.score == self.SCORE_LUONG:
                 self.luong_w = tf.keras.layers.Dense(input_dim, use_bias=False, name='luong_w')
@@ -102,6 +107,8 @@ class Attention(  layers.Layer):
         return input_shape[0][0], self.units 
 
     def call(self, inputs, training=None, **kwargs):
+        # inputs[0] 是序列隐藏状态 h_s；
+        # inputs[1] 若存在，则表示与当前 horizon 相关的动态上下文。
         print('\n\n -------------------------- attention starts --------\n\n')
         
 
@@ -151,6 +158,7 @@ class Attention(  layers.Layer):
         return config
 
 class DynamicEmbeddings(layers.Layer):
+    # 将原始时序先经过 LSTM，再用注意力压缩成“预测步相关”的动态表示。
     def __init__(self,  units,**kwargs ):
         super(DynamicEmbeddings, self).__init__(**kwargs)
         self.units =  units
@@ -162,12 +170,13 @@ class DynamicEmbeddings(layers.Layer):
         self.G = tf.keras.layers.LSTM(16, activation='tanh',return_sequences=True,return_state=False)
 
     def call(self, inputs):
-
-
-        return self.hX( [self.G(inputs) ])
+        # 该层只接收单个 3D 张量 [batch, time_steps, no_variables]，
+        # 先经 LSTM，再把序列隐藏状态交给 Attention 压缩。
+        return self.hX([self.G(inputs)])
 
 class VA(tf.keras.layers.Layer):
-    ##variable attention
+    # 变量注意力:
+    # 在同一时间步上，学习“不同特征/变量对预测的重要性”。
     def __init__(self,  units,dim,score_size,input_size,horizon,alpha,use_GCL=True,seed=123,self_attention=32,k=3,**kwargs):
         super(VA, self).__init__(**kwargs)
         self.units =  units
@@ -209,6 +218,9 @@ class VA(tf.keras.layers.Layer):
 
 
     def call(self, inputs_list):
+        # inputs 的核心形状:
+        # [batch, horizon, time_steps, no_variables]
+        # 输出 context / score 会保留 horizon 维，用于多步预测。
         if len(inputs_list) > 1:
           inputs  ,horizon_rep =  inputs_list[0],inputs_list[1]
         else:
@@ -231,7 +243,8 @@ class VA(tf.keras.layers.Layer):
 
         dim_ = 1
 
-        # use Dynamic represntaion
+        # 使用动态表示时，每个预测步 t 都会结合 horizon_rep[:, t]
+        # 生成一套“随预测步变化”的变量上下文与分数。
         if self.use_GCL:
             # No normalise 
             # context_ = [ [     layers.Add()( [ self.X2[i]( self.X1[i]( inputs_[:,i,:] ))  , horizon_rep[:,t]] ) for i  in  range(self.input_size)] for t in tqdm(range(self.horizon), desc = 'caclulate embeddings VA.. ')]# t in range(self.horizon)]
@@ -258,9 +271,10 @@ class VA(tf.keras.layers.Layer):
             context =   [ [  self.G[i] (context_[t][i]) for i  in  range(self.input_size)] for t in tqdm(range(self.horizon), desc = 'project VA context.. ')]
 
 
+        # score 的语义是“变量重要性分数”，后续会在 AGU 中与时间分数融合。
         score = [ [ tf.nn.relu (context[t][i]) for i  in  range(self.input_size)] for t in tqdm(range(self.horizon), desc = 'find scores VA.. ')]
-        print('len(score)',len(score))
-        print('len(score[0])',len(score[0]))
+        print('score groups', len(score))
+        print('score variables per horizon', len(score[0]))
         print('score[0][0].shape',score[0][0].shape)
         # print('score',score)
         # print('score',score)
@@ -271,19 +285,16 @@ class VA(tf.keras.layers.Layer):
         context = [ layers.Concatenate(dim_) (context[t]) for t  in  range(self.horizon)]
         print('before compresss => context[t], t=0:',context[0].shape)
 
-        print('len(context)',len(context))
-        print('len(context[0])',len(context[0]))
-        print('context[0].shape)',context[0].shape)
-        print('context[0][0].shape',context[0][0].shape)
+        print('context groups', len(context))
+        print('context[0].shape',context[0].shape)
 
         context= [self.dropout[t] (self.context_compressor[t]( [context[t]]  ) ) for t  in tqdm(  range(self.horizon), desc = 'context_compressing.. ')]
         # context= [self.dropout[t] (self.context_compressor[t](  layers.Multiply()( [context[t],score[t] ] )   ) ) for t  in tqdm(  range(self.horizon), desc = 'context_compressing.. ')]
         print('after compresss => context[t], t=0:',context[0].shape)
 
         print('context after context_compressor')
-        print('len(context)',len(context))
-        print('len(context[0])',len(context[0]))
-        print('context[0][0].shape',context[0][0].shape)
+        print('compressed context groups', len(context))
+        print('compressed context[0].shape',context[0].shape)
 
         score = [  tf.expand_dims(score[t],1)  for t  in  range(self.horizon)]
         context = [  tf.expand_dims(context[t],1)  for t  in  range(self.horizon)]
@@ -296,7 +307,8 @@ class VA(tf.keras.layers.Layer):
 
 
 class TA(tf.keras.layers.Layer):
-    ##temporal attention
+    # 时间注意力:
+    # 在同一个变量维上，学习“窗口内哪些历史时刻更重要”。
     def __init__(self,  units,dim,score_size,input_size,horizon,alpha,use_GCL=True,seed=123,self_attention=32,k=3,**kwargs):
         super(TA, self).__init__(**kwargs)
         self.units =  units
@@ -325,6 +337,8 @@ class TA(tf.keras.layers.Layer):
 
 
     def call(self, inputs_list):
+        # 这里会先对每个变量独立跑一层 LSTM，
+        # 再对每个预测步分别计算时间注意力分数。
         if len(inputs_list)>1:
           inputs  ,horizon_rep =  inputs_list[0],inputs_list[1]
         else:
@@ -343,10 +357,8 @@ class TA(tf.keras.layers.Layer):
 
         dim_ = self.dim
         _1  = [ self.X1[i](inputs_[:,:,i:i+1] )   for i  in  tqdm(range(self.input_size) , desc = 'caclulate embeddings TA (1).. ')]
-        print('len _1,  ',len(_1))
-        print(_1)
-        print('len _1[0],  ',len(_1[0]))
-        print('_1[0][0] shape,  ',_1[0][0].shape)
+        print('TA embedding groups', len(_1))
+        print('_1[0].shape', _1[0].shape)
         print('inputs_[:,:,0:1] shape,  ',inputs_[:,:,0:1].shape)
         
         # use Dynamic represntaion
@@ -398,6 +410,8 @@ class TA(tf.keras.layers.Layer):
 class MDA(tf.keras.layers.Layer):
     '''
     Multidimensional Dynamical Attention (MDA) layer
+    将变量注意力（VA）与时间注意力（TA）组合起来，
+    形成可同时解释“哪个特征重要”和“哪个时刻重要”的联合注意力层。
     '''
     def __init__(self, no_variables,timesteps,horizon,shared_ta_units=3,shared_va_units=3,alpha=0.01, units=1,use_TA=True,use_VA=True,use_GCL=True,use_context=True,approach='sequential', static_attention=False,seed=123,self_attention=32,k=3,**kwargs):
         super(MDA, self).__init__(**kwargs)
@@ -444,18 +458,20 @@ class MDA(tf.keras.layers.Layer):
 
 
     def call(self, inputs ):  # Defines the computation from inputs to outputs.
+        # 外部输入为 [batch, horizon, time_steps, no_variables]。
+        # 这里先分别计算 VA/TA，再交给 AGU 融合成最终上下文表示。
         alphas =[]
         contexts =[]
 
         inputs_ = inputs[:,0,:,:]
 
-        #uae horizon rep
+        # 若启用 GCL，则先为不同预测步构造动态 horizon 表示。
         if self.use_GCL:
             if self.use_VA :
-                horizon_rep_v =  self.hX_v(  [inputs_] )
+                horizon_rep_v =  self.hX_v(inputs_)
 
             if self.use_TA :
-                horizon_rep_t =  self.hX_t(  [inputs_] )
+                horizon_rep_t =  self.hX_t(inputs_)
 
 
         if self.use_VA:
@@ -473,6 +489,8 @@ class MDA(tf.keras.layers.Layer):
         
         print("\n\n----------- VA done -----------\n\n")
     
+        # parallel: TA 和 VA 都直接看原始输入
+        # sequential: 先用 VA 对输入做一次加权，再交给 TA
         if self.type== 'parallel'  :
             selected_seq = inputs
         elif self.type== 'sequential'  :
@@ -498,9 +516,11 @@ class MDA(tf.keras.layers.Layer):
 
 
     def AGU (self, alphas,contexts,inputs  ):
+        # AGU 负责把 TA/VA 两类分数融合起来，并构造最终预测头使用的上下文。
         self.scores_length = len(alphas)
         
         if len(alphas) > 1:
+            # 两类注意力都启用时，直接做逐元素相乘得到联合权重。
             score = layers.Multiply ()(alphas)
 
 
@@ -544,6 +564,9 @@ class MDA(tf.keras.layers.Layer):
 
 
 class MAFS_extend(object):
+    # 顶层模型封装:
+    # 输入 3D 时序张量 [batch, time_steps, no_variables]
+    # 输出多步预测 [batch, horizon]
 
     def __init__(self ,params ):
         print('MAFS_extend')
@@ -555,6 +578,9 @@ class MAFS_extend(object):
 
 
     def build_model(self):
+        # 先把单条输入序列复制 horizon 次，扩成
+        # [batch, horizon, time_steps, no_variables]，
+        # 让 MDA 在每个预测步上都能学习到不同的注意力。
 
         input_seq = layers.Input(( self.params['time_steps'] , self.params['no_varibles']))
         # print('input_seq',input_seq.shape)
@@ -565,8 +591,16 @@ class MAFS_extend(object):
 
         # new_represntaion = input_seq
         ## add dimension to the input to represnt the prediciton horizon
-        new_represntaion = tf.expand_dims(input_seq,1)
-        new_represntaion = layers.Concatenate(1)([new_represntaion for _ in range(self.params['horizon'] )])
+        # Keras 3 下不能直接把 KerasTensor 喂给裸 tf.expand_dims；
+        # 这里改为 Lambda 层包装，保持 Functional API 兼容。
+        new_represntaion = layers.Lambda(
+            lambda x: tf.expand_dims(x, axis=1),
+            name="add_horizon_axis",
+        )(input_seq)
+        new_represntaion = layers.Lambda(
+            lambda x: tf.repeat(x, repeats=self.params['horizon'], axis=1),
+            name="repeat_horizon_axis",
+        )(new_represntaion)
         # print('new_represntaion',new_represntaion.shape)
         
         scores,contexts = MDA( units=self.params['units'],\
@@ -597,6 +631,8 @@ class MAFS_extend(object):
         outputs = layers.Reshape( (self.params['horizon'],))(outputs)
 
 
+        # 训练时主要使用 outputs；
+        # weights_model 则会把 score 一并暴露给外部做解释或后续特征构造。
         scores_gates = [outputs, scores]
 
 
@@ -627,5 +663,3 @@ def learning_task(horizon,h_s, x, activation='None', name='',use_timedistributed
         outputs =layers.Dense(h_s,activation=activation ) ( x)
         outputs =layers.Dense(horizon )( outputs)
     return outputs
-
-
