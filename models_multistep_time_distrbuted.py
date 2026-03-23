@@ -52,6 +52,7 @@ class AmplificationLayer(layers.Layer):
         self.exponent = exponent
 
     def call(self, inputs):
+        # 对时间注意力分数做幂次放缩，缓和极端尖锐的权重分布。
         amplified_output = tf.pow(inputs, self.exponent)
         return amplified_output
 
@@ -76,6 +77,8 @@ class Attention(  layers.Layer):
     def build(self, input_shape):
 
         if len(input_shape) >1:
+          # 当 attention 额外接收 horizon 动态上下文时，
+          # 先把该上下文投影到与隐藏状态兼容的维度，再参与打分。
           self.hNorm =   tf.keras.layers.LayerNormalization()    
           self. intermidiate_projector =  tf.keras.layers.Dense(self.units ,use_bias=False) 
         input_dim = int(input_shape[0][-1])
@@ -121,6 +124,8 @@ class Attention(  layers.Layer):
             d_c_broadcasted = tf.expand_dims(d_c, axis=1)
             d_c = tf.tile(d_c_broadcasted, [1, tf.shape(h_s)[1], 1])
 
+            # 动态上下文会被广播到整个时间维，再与原始隐藏状态相加，
+            # 让注意力在不同预测步学到不同的关注模式。
             h_s = tf.keras.layers.Add()([d_c,h_s] )#h_t
             
         if self.score == self.SCORE_LUONG:
@@ -198,6 +203,8 @@ class VA(tf.keras.layers.Layer):
 
         #use dynamic weighting
         if self.use_GCL:
+            # GCL 打开时，每个预测步 t、每个输入位置 i 都有一套独立投影层，
+            # 用来表达“未来第 t 步”下变量重要性的变化。
             self.G = [ [ layers.Dense(self.score_size  ,kernel_regularizer=tf.keras.regularizers.l2(self.alpha)) for i in range(self.input_size)] for h in range(self.horizon)]
             #normalise 
             self.hNorm = [ [ layers.LayerNormalization()   for i in range(self.input_size)] for h in range(self.horizon)]
@@ -259,6 +266,8 @@ class VA(tf.keras.layers.Layer):
             # exit()
             # I changed this line to fix the shape mismatching  issue 
             # context_ = [ [ self.hNorm[t][i] ( layers.Add()( [ self.X2[i]( self.X1[i]( inputs_[:,i,:] ))  , horizon_rep[:,t]] )) for i  in  range(self.input_size)] for t in tqdm(range(self.horizon), desc = 'caclulate embeddings VA.. ')]# t in range(self.horizon)]
+            # 这里把 horizon_rep[:, t] 先扩成列向量再过 X2，
+            # 避免直接与变量表示相加时出现 shape 对不上。
             context_ = [ [ self.hNorm[t][i] ( layers.Add()( [ self.X1[i]( inputs_[:,i,:]) ,self.X2[i](  tf.expand_dims(horizon_rep[:,t], axis=-1)  )] ) )for i  in  range(self.input_size)] for t in tqdm(range(self.horizon), desc = 'caclulate embeddings VA.. ')]# t in range(self.horizon)]
             
             
@@ -289,6 +298,8 @@ class VA(tf.keras.layers.Layer):
         print('context[0].shape',context[0].shape)
 
         context= [self.dropout[t] (self.context_compressor[t]( [context[t]]  ) ) for t  in tqdm(  range(self.horizon), desc = 'context_compressing.. ')]
+        # context_compressor 会把“每个预测步上一整张变量上下文图”压成定长向量，
+        # 供后续预测头使用。
         # context= [self.dropout[t] (self.context_compressor[t](  layers.Multiply()( [context[t],score[t] ] )   ) ) for t  in tqdm(  range(self.horizon), desc = 'context_compressing.. ')]
         print('after compresss => context[t], t=0:',context[0].shape)
 
@@ -328,6 +339,7 @@ class TA(tf.keras.layers.Layer):
         #D_C learner
 
         self.X1 = [layers.LSTM(units=self.units,return_sequences=True,recurrent_dropout=0.1 ,return_state=False,kernel_regularizer=tf.keras.regularizers.l2(self.alpha))  for i in range(self.input_size)]
+        # 每个预测步各有一个 Attention，用来表达“第 t 步预测时该看哪些历史时刻”。
         self.X = [Attention(units=self.units,return_score=True, horizon=self.horizon   )  for i in range(self.horizon)]
 
         self.context_compressor = [Attention(units=self.self_attention) for h in range(self.horizon)]
@@ -363,6 +375,7 @@ class TA(tf.keras.layers.Layer):
         
         # use Dynamic represntaion
         if self.use_GCL:
+            # 每个变量的 LSTM 序列表示，会和对应预测步的 horizon_rep 一起进入 attention。
             _2  = [[self.X[t]([ _1[i] ,horizon_rep[:,t]]) for i  in  range(self.input_size)] for t in tqdm(range(self.horizon), desc = 'caclulate embeddings TA.. ')]
             # _2  = [self.X[t]([ _1[i] ,horizon_rep[:,t]]) for i  in  range(self.input_size)]  desc = 'caclulate embeddings TA.. ')]
         print('len _2,  context',len(_2))
@@ -447,8 +460,10 @@ class MDA(tf.keras.layers.Layer):
                 self.hX_v = horizon_rep #DynamicEmbeddings(units=self.horizon)
             else:
                 self.hX_v =  DynamicEmbeddings(units=self.horizon)
+            # VA 的输入大小是“时间步数”，因为它把每个时间位置都当作一个待比较对象来建模。
             self.va_unit = VA( units=self.shared_va_units,dim=2,alpha=self.alpha,score_size=self.novaribles,input_size=self.timesteps,horizon=self.horizon, use_GCL=self.use_GCL ,seed = self.seed,self_attention=self.self_attention,k = self.k )
         if self.use_TA :
+            # TA 的输入大小是“变量数”，因为它会对每个变量各自建模时间依赖。
             self.ta_unit = TA( units=self.shared_ta_units,dim=-1,alpha=self.alpha, score_size=self.timesteps,input_size=self.novaribles,horizon=self.horizon, use_GCL=self.use_GCL,seed = self.seed ,self_attention=self.self_attention )
             if shared_DRL:
                 self.hX_t = horizon_rep #DynamicEmbeddings(units=self.horizon)
@@ -526,6 +541,7 @@ class MDA(tf.keras.layers.Layer):
 
             if self.use_context:
                 print('use_context')
+                # inputs * score 保留的是“原输入经联合注意力筛选后的显著部分”。
                 context_times_score = layers.Multiply()([inputs,score])
                 context_times_score = layers.Reshape((context_times_score.shape[1],context_times_score.shape[2]*context_times_score.shape[3]))(context_times_score)
                 print('context_times_score',context_times_score)
@@ -540,6 +556,8 @@ class MDA(tf.keras.layers.Layer):
                   context_t = contexts[id]
 
                 # combined_context = [context_times_score,context_v,context_t]
+                # 当前实现最终拼的是 VA/TA 两路压缩上下文；
+                # context_times_score 保留下来更多是便于调试和后续替换。
                 combined_context = [context_v,context_t]
                 contexts = layers.Concatenate(-1)(combined_context)
                 print('contexts',contexts)
@@ -629,6 +647,7 @@ class MAFS_extend(object):
         outputs =  layers.Dropout( self.params['dropout_rate'] )(outputs)
         outputs = layers.TimeDistributed(layers.Dense( 1 ))(outputs)
         outputs = layers.Reshape( (self.params['horizon'],))(outputs)
+        # 到这里，每个预测步都有一个标量输出；horizon=1 时最终就是 [batch, 1]。
 
 
         # 训练时主要使用 outputs；
